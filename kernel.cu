@@ -157,25 +157,40 @@ __device__ float* gpresums;
 __device__ float* sums;
 float arr[X];
 
+__global__ void  compute_presum(float *  cpresums, int x){
+    const float gain = 6.0f;
+    const float z = sqrtf(3.f) - 2.f;
+    float z1 = z;
+    float z2 = powf(z, 2 * x - 2);
+    float iz = 1.f / z;
+    cpresums[0] = 0;
+    cpresums[x-1] = 0;
+    for (int j = 1; j < (x - 1); ++j) {
+        cpresums[j] = (z2 + z1);
+        z1 *= z;
+        z2 *= iz;
+    }
+}
+
 void solveGPU(float *in, float *out, int x, int y) {
 
 
     cudaMalloc(&gpresums, x * sizeof(float));
 
-    const float gain = 6.0f;
-    const float z = 1.73205080756887729f - 2.f;
-    float z1 = z;
-    float z2 = powf(z, 2 * X - 2);
-    float iz = 1.f / z;
-    arr[0] = 0;
-    arr[X-1] = 0;
-    for (int j = 1; j < (X - 1); ++j) {
-        arr[j] = (z2 + z1);
-        z1 *= z;
-        z2 *= iz;
-    }
-    cudaMemcpy(gpresums, arr, x, cudaMemcpyHostToDevice);
-
+//    const float gain = 6.0f;
+//    const float z = 1.73205080756887729f - 2.f;
+//    float z1 = z;
+//    float z2 = powf(z, 2 * X - 2);
+//    float iz = 1.f / z;
+//    arr[0] = 0;
+//    arr[X-1] = 0;
+//    for (int j = 1; j < (X - 1); ++j) {
+//        arr[j] = (z2 + z1);
+//        z1 *= z;
+//        z2 *= iz;
+//    }
+//    cudaMemcpy(gpresums, arr, x, cudaMemcpyHostToDevice);
+    compute_presum<<<1, 1>>>(gpresums, x);
 
     float * cur = in;
     bool first = true;
