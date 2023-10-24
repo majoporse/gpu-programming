@@ -2,16 +2,9 @@
 #define BLOCK_SIZE 32
 #include <cmath>
 
-// copy input data
-__global__ void copy_data(float* din, float* dout){
-    unsigned int i = blockIdx . x* blockDim . x + threadIdx . x;
-    dout[i] = din[i] * 6.0f;
-}
-
 __global__ void compute_lines(const float * __restrict__ din, float* __restrict__ dout, int x, int y){
-    __ldg(din);
     unsigned int line = blockIdx . x * blockDim.x + threadIdx.x;
-    float z = sqrtf(3.f) - 2.f;
+    float z = 1.73205080756887729f - 2.f;
     float z1;
     float* myLine = dout + (line * x);
     const float* myLineIn = din + (line * x);
@@ -41,11 +34,9 @@ __global__ void compute_lines(const float * __restrict__ din, float* __restrict_
 }
 
 __global__ void compute_cols(const float * __restrict__ din, float* __restrict__ dout, int x, int y){
-    __ldg(din);
-    __ldg(dout);
+
     unsigned int col = blockIdx . x * blockDim.x + threadIdx.x;
-    const float z = sqrtf(3.f) - 2.f;
-//    float z1;
+    const float z = 1.73205080756887729f - 2.f; //sqrt(3)
     float *myCol = dout + col;
     const float *myColIn = dout + col;
 
@@ -57,14 +48,22 @@ __global__ void compute_cols(const float * __restrict__ din, float* __restrict__
 //    if (col == 10){
 //        printf("%f", sum);
 //    }
+
     // iterate back and forth
-    myCol[0*x] = sum * z / (1.f - powf(z, 2 * y));
+    float cur;
+    float last = sum * z / (1.f - powf(z, 2 * y));
+    myCol[0] = last;
     for (int j = 1; j < y; ++j) {
-        myCol[j*x] = myColIn[j*x] * 6 + z * myCol[(j - 1)*x];
+        cur = myColIn[j*x] * 6 + z * last;
+        myCol[j*x] = cur;
+        last = cur;
     }
-    myCol[(y - 1)*x] *= z / (z - 1.f);
+    last = myCol[(y - 1)*x] * z / (z - 1.f);
+    myCol[(y - 1)*x] = last;
     for (int j = y - 2; 0 <= j; --j) {
-        myCol[j*x] = z * (myCol[(j + 1)*x] - myCol[j*x]);
+        cur = z * (last - myCol[j*x]);
+        myCol[j*x] = cur;
+        last = cur;
     }
 }
 
@@ -153,37 +152,31 @@ __global__ void com2(const float* presums, float* sums, const float * in, int x)
     atomicAdd(&sums[tid + block_pos_x * blockDim.x], sum);
 }
 
-__global__ void  compute_presum(float *  cpresums, int x){
-    const float gain = 6.0f;
-    const float z = sqrtf(3.f) - 2.f;
-    float z1 = z;
-    float z2 = powf(z, 2 * x - 2);
-    float iz = 1.f / z;
-
-    cpresums[0] = 0;
-    cpresums[x-1] = 0;
-    for (int j = 1; j < (x - 1); ++j) {
-        cpresums[j] = (z2 + z1);
-        z1 *= z;
-        z2 *= iz;
-    }
-}
 
 __device__ float* gpresums;
-//__device__ float* sums;
-//__device__ float* sums2;
+__device__ float* sums;
+float arr[X];
 
 void solveGPU(float *in, float *out, int x, int y) {
 
-//    copy_data<<<(x*y)/256, 256>>>(in, out);
-
 
     cudaMalloc(&gpresums, x * sizeof(float));
-//    cudaMalloc(&sums, x * sizeof(float));
-//    cudaMalloc(&sums2, x * sizeof(float));
-//    cudaMemset(out, 0, x*y* sizeof(float));
 
-    compute_presum<<<1,1>>>(gpresums, x);
+    const float gain = 6.0f;
+    const float z = 1.73205080756887729f - 2.f;
+    float z1 = z;
+    float z2 = powf(z, 2 * X - 2);
+    float iz = 1.f / z;
+    arr[0] = 0;
+    arr[X-1] = 0;
+    for (int j = 1; j < (X - 1); ++j) {
+        arr[j] = (z2 + z1);
+        z1 *= z;
+        z2 *= iz;
+    }
+    cudaMemcpy(gpresums, arr, x, cudaMemcpyHostToDevice);
+
+
     float * cur = in;
     bool first = true;
     for (int a = x; a > 0; a /= SUMBLOCK) {
@@ -195,12 +188,9 @@ void solveGPU(float *in, float *out, int x, int y) {
         cur = out;
         first = false;
     }
-//    com<<<(x*y)/(128 * 128), 128>>>(gpresums, sums, in, x);
 
     compute_lines<<<y/BLOCK_SIZE, BLOCK_SIZE>>>(in, out, x, y);
 
-//    copy_data<<<(x*y)/256, 256>>>(in, out);
-//    com2<<<(x*y)/(128 * 128), 128>>>(gpresums, sums2, out, x);
     cur = out;
     first = true;
     for (int a = x; a > 0; a /= SUMBLOCK) {
