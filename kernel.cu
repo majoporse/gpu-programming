@@ -98,17 +98,18 @@ __device__ inline void computesumrec(volatile float* sv, int tid){
 template<>
 __device__ inline void computesumrec<1>(volatile float* sv, int tid) {}
 #define SUMBLOCK 64
+__device__ float gpresums[X];
 
-__global__ void compute_line_sum(float *in, float * __restrict__ presums, float* out, int x, bool first, int to_sum){
+__global__ void compute_line_sum(const float * in, float* out, int x, bool first, int to_sum){
     __shared__ float sv [SUMBLOCK];
 
     unsigned int tid = threadIdx.x;
     unsigned int i = blockIdx.y * x + blockDim.x * blockIdx.x + tid;
 
-    float c = first ? __ldg(&presums[blockDim.x * blockIdx.x + tid]) : 1;
+    float c = first ? __ldg(&gpresums[blockDim.x * blockIdx.x + tid]) : 1;
 
     //copy to memory with gain if first
-    float a =  blockDim.x * blockIdx.x + tid < to_sum ? in[i] : 0;
+    float a =  blockDim.x * blockIdx.x + tid < to_sum ? __ldg(&in[i]) : 0;
     sv [ tid ] = a * c;
     __syncthreads();
 
@@ -117,13 +118,13 @@ __global__ void compute_line_sum(float *in, float * __restrict__ presums, float*
         out[blockIdx.y * x + blockIdx.x] = sv[0];
 }
 
-__global__ void compute_col_sum(float *in, float * __restrict__ presums, float* out, int x, bool first, int to_sum){
+__global__ void compute_col_sum(float *in, float* out, int x, bool first, int to_sum){
     __shared__ float sv [SUMBLOCK];
 
     unsigned int tid = threadIdx.x;
     unsigned int i =  blockIdx.x + (blockIdx.y * blockDim.x + tid) * x;
 
-    float c = first ? __ldg(&presums[blockIdx.y * blockDim.x + tid]) : 1;
+    float c = first ? __ldg(&gpresums[blockIdx.y * blockDim.x + tid]) : 1;
     float a = blockIdx.y * blockDim.x + tid < to_sum ? in[i] : 0;
     //copy to memory with gain if first
     sv [ tid ] = a * c;
@@ -153,8 +154,7 @@ __global__ void com2(const float* presums, float* sums, const float * in, int x)
 }
 
 
-__device__ float* gpresums;
-__device__ float* sums;
+
 float arr[X];
 
 __global__ void  compute_presum(float *  cpresums, int x){
@@ -175,8 +175,8 @@ __global__ void  compute_presum(float *  cpresums, int x){
 void solveGPU(float *in, float *out, int x, int y) {
 
 
-    cudaMalloc(&gpresums, x * sizeof(float));
 
+//    cudaMalloc(&gpresums, x * sizeof(float));
     const float gain = 6.0f;
     const float z = 1.73205080756887729f - 2.f;
     float z1 = z;
@@ -189,7 +189,7 @@ void solveGPU(float *in, float *out, int x, int y) {
         z1 *= z;
         z2 *= iz;
     }
-    cudaMemcpy(gpresums, arr, x, cudaMemcpyHostToDevice);
+    cudaMemcpyToSymbol(gpresums, arr, x * sizeof(float));
 //    compute_presum<<<1, 1>>>(gpresums, x);
 
     float * cur = in;
@@ -198,7 +198,7 @@ void solveGPU(float *in, float *out, int x, int y) {
         int aa = (a + SUMBLOCK - 1) / SUMBLOCK;
         dim3 dimgrid = dim3(aa, y);
 
-        compute_line_sum<<<dimgrid, SUMBLOCK>>>(cur, gpresums, out, x, first, a);
+        compute_line_sum<<<dimgrid, SUMBLOCK>>>(cur, out, x, first, a);
 //        printf("%d\n", aa);
         cur = out;
         first = false;
@@ -212,7 +212,7 @@ void solveGPU(float *in, float *out, int x, int y) {
         int aa = (a + SUMBLOCK - 1) / SUMBLOCK;
         dim3 dimgrid = dim3(y, aa);
 
-        compute_col_sum<<<dimgrid, SUMBLOCK>>>(cur, gpresums, in, x, first, a);
+        compute_col_sum<<<dimgrid, SUMBLOCK>>>(cur, in, x, first, a);
 //        printf("%d\n", aa);
         cur = in;
         first = false;
