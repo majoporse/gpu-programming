@@ -100,7 +100,7 @@ __device__ inline void computesumrec<1>(volatile float* sv, int tid) {}
 #define SUMBLOCK 64
 __device__ float gpresums[X];
 
-__global__ void compute_line_sum(const float * in, float* out, int x, bool first, int to_sum){
+__global__ void compute_line_sum(const float * __restrict__ in, float* out, int x, bool first, int to_sum){
     __shared__ float sv [SUMBLOCK];
 
     unsigned int tid = threadIdx.x;
@@ -118,14 +118,14 @@ __global__ void compute_line_sum(const float * in, float* out, int x, bool first
         out[blockIdx.y * x + blockIdx.x] = sv[0];
 }
 
-__global__ void compute_col_sum(float *in, float* out, int x, bool first, int to_sum){
+__global__ void compute_col_sum(const float * __restrict__ in, float* out, int x, bool first, int to_sum){
     __shared__ float sv [SUMBLOCK];
 
     unsigned int tid = threadIdx.x;
     unsigned int i =  blockIdx.x + (blockIdx.y * blockDim.x + tid) * x;
 
     float c = first ? __ldg(&gpresums[blockIdx.y * blockDim.x + tid]) : 1;
-    float a = blockIdx.y * blockDim.x + tid < to_sum ? in[i] : 0;
+    float a = blockIdx.y * blockDim.x + tid < to_sum ? __ldg(&in[i]) : 0;
     //copy to memory with gain if first
     sv [ tid ] = a * c;
     __syncthreads();
