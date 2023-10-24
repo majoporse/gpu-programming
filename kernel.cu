@@ -105,7 +105,7 @@ __global__ void compute_line_sum(float *in, float * __restrict__ presums, float*
     unsigned int tid = threadIdx.x;
     unsigned int i = blockIdx.y * x + blockDim.x * blockIdx.x + tid;
 
-    float c = first ? presums[blockDim.x * blockIdx.x + tid] : 1;
+    float c = first ? __ldg(&presums[blockDim.x * blockIdx.x + tid]) : 1;
 
     //copy to memory with gain if first
     float a =  blockDim.x * blockIdx.x + tid < to_sum ? in[i] : 0;
@@ -123,7 +123,7 @@ __global__ void compute_col_sum(float *in, float * __restrict__ presums, float* 
     unsigned int tid = threadIdx.x;
     unsigned int i =  blockIdx.x + (blockIdx.y * blockDim.x + tid) * x;
 
-    float c = first ? presums[blockIdx.y * blockDim.x + tid] : 1;
+    float c = first ? __ldg(&presums[blockIdx.y * blockDim.x + tid]) : 1;
     float a = blockIdx.y * blockDim.x + tid < to_sum ? in[i] : 0;
     //copy to memory with gain if first
     sv [ tid ] = a * c;
