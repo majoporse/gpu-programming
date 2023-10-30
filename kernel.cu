@@ -36,21 +36,17 @@ __global__ void compute_lines(const float * __restrict__ din, float* dout, int x
     }
 }
 
-__global__ void compute_cols(const float * __restrict__ din, float* dout, int x, int y){
+__global__ void compute_cols(const float * __restrict__ din, float* dout, int x, int y, bool in_col){
 
     unsigned int col = blockIdx . x * blockDim.x + threadIdx.x;
     const float z = 1.73205080756887729f - 2.f; //sqrt(3)
     float *myCol = dout + col;
-    const float *myColIn = dout + col;
 
     // compute 'sum'
-    float sum = (myColIn[0*x] + powf(z, y)
-                              * myColIn[(y - 1)*x]) * 6 * (1.f + z) / z;
-
-    sum += din[col] * 6;
-//    if (col == 10){
-//        printf("%f", sum);
-//    }
+    float sum = (myCol[0*x] + powf(z, y)
+                              * myCol[(y - 1)*x]) * 6 * (1.f + z) / z;
+    int i = in_col ? col * x : col;
+    sum += din[i] * 6;
 
     // iterate back and forth
     float cur;
@@ -58,7 +54,7 @@ __global__ void compute_cols(const float * __restrict__ din, float* dout, int x,
     myCol[0] = last;
     for (int j = 1; j < y; ++j) {
         __syncthreads();
-        cur = myColIn[j*x] * 6 + z * last;
+        cur = myCol[j*x] * 6 + z * last;
         myCol[j*x] = cur;
         last = cur;
 
@@ -184,22 +180,22 @@ void solveGPU(float *in, float *out, int x, int y) {
     dim3 a = dim3(x/32, y/32);
     dim3 b = dim3(32, 8);
 //    compute_presum<<<1, 1>>>(gpresums, x);
-    float * cur = in;
+
     bool first = true;
+    transposeCoalesced<<<a, b>>>(out, in);
     for (int a = x; a > 0; a /= SUMBLOCK) {
         int aa = (a + SUMBLOCK - 1) / SUMBLOCK;
         dim3 dimgrid = dim3(aa, y);
 
-        compute_line_sum<<<dimgrid, SUMBLOCK>>>(cur, out, x, first, a);
+        compute_line_sum<<<dimgrid, SUMBLOCK>>>(in, in, x, first, a);
 //        printf("%d\n", aa);
-        cur = out;
         first = false;
     }
-//    transposeCoalesced<<<a, b>>>(out, out);
-//    transposeCoalesced<<<a, b>>>(out, out);
-    compute_lines<<<y/BLOCK_SIZE, BLOCK_SIZE>>>(in, out, x, y);
+    compute_cols<<<x/BLOCK_SIZE, BLOCK_SIZE>>>(in, out, x, y, true);
+    transposeCoalesced<<<a, b>>>(in, out);
 
-    cur = out;
+    cudaMemcpy(out, in, x*y* sizeof(float), cudaMemcpyDeviceToDevice);
+    float* cur = out;
     first = true;
     for (int a = x; a > 0; a /= SUMBLOCK) {
         int aa = (a + SUMBLOCK - 1) / SUMBLOCK;
@@ -210,7 +206,8 @@ void solveGPU(float *in, float *out, int x, int y) {
         cur = in;
         first = false;
     }
-    compute_cols<<<x/BLOCK_SIZE, BLOCK_SIZE>>>(in, out, x, y);
+    compute_cols<<<x/BLOCK_SIZE, BLOCK_SIZE>>>(in, out, x, y, false);
+
 
 }
 
