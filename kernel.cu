@@ -1,40 +1,8 @@
 //TODO kernel implementation
 #define BLOCK_SIZE 32
 #include <cmath>
-
-__global__ void compute_lines(const float * __restrict__ din, float* dout, int x, int y){
-    unsigned int line = blockIdx . x * blockDim.x + threadIdx.x;
-    float z = 1.73205080756887729f - 2.f;
-    float z1;
-    float* myLine = dout + (line * x);
-    const float* myLineIn = din + (line * x);
-
-    // compute 'sum'
-    float sum = (myLineIn[0] + powf(z, x)
-                             * myLineIn[x - 1]) * 6 * (1.f + z) / z;
-    sum += dout[line * x] * 6;
-
-
-    // iterate back and forth
-    float last = sum * z / (1.f - powf(z, 2 * x));
-    myLine[0] = last;
-    float cur;
-    for (int j = 1; j < x; ++j) {
-        __syncthreads();
-        cur = myLineIn[j]* 6 + z * last;
-        myLine[j] = cur;
-        last = cur;
-    }
-    __syncthreads();
-    last = myLine[x - 1] * z / (z - 1.f);
-    myLine[x - 1] =  last;
-    for (int j = x - 2; 0 <= j; --j) {
-        __syncthreads();
-        cur = z * (last - myLine[j]);
-        myLine[j] = cur;
-        last = cur;
-    }
-}
+__device__ float BUF[X*Y];
+__device__ float gpresums[X];
 
 __global__ void compute_cols(const float * __restrict__ din, float* dout, int x, int y, bool in_col){
 
@@ -46,7 +14,7 @@ __global__ void compute_cols(const float * __restrict__ din, float* dout, int x,
     float sum = (myCol[0*x] + powf(z, y)
                               * myCol[(y - 1)*x]) * 6 * (1.f + z) / z;
     int i = in_col ? col * x : col;
-    sum += din[i] * 6;
+    sum += BUF[i] * 6;
 
     // iterate back and forth
     float cur;
@@ -84,10 +52,12 @@ __device__ inline void computesumrec(volatile float* sv, int tid){
 template<>
 __device__ inline void computesumrec<1>(volatile float* sv, int tid) {}
 #define SUMBLOCK 128
-__device__ float gpresums[X];
 
-__global__ void compute_line_sum(const float * __restrict__ in, float* out, int x, bool first, int to_sum){
+
+__global__ void compute_line_sum(const float * __restrict__ in, int x, bool first, int to_sum){
     __shared__ float sv [SUMBLOCK];
+    if (!first)
+        in = BUF;
 
     unsigned int tid = threadIdx.x;
     unsigned int i = blockIdx.y * x + blockDim.x * blockIdx.x + tid;
@@ -101,43 +71,11 @@ __global__ void compute_line_sum(const float * __restrict__ in, float* out, int 
 
     computesumrec<SUMBLOCK/2>(sv, tid);
     if (tid == 0)
-        out[blockIdx.y * x + blockIdx.x] = sv[0];
-}
-
-__global__ void compute_col_sum(const float * __restrict__ in, float* out, int x, bool first, int to_sum){
-    __shared__ float sv [SUMBLOCK];
-
-    unsigned int tid = threadIdx.x;
-    unsigned int i =  blockIdx.x + (blockIdx.y * blockDim.x + tid) * x;
-
-    float c = first ? gpresums[blockIdx.y * blockDim.x + tid] : 1;
-    float a = blockIdx.y * blockDim.x + tid < to_sum ? in[i] : 0;
-    //copy to memory with gain if first
-    sv [ tid ] = a * c;
-    __syncthreads();
-
-    computesumrec<SUMBLOCK/2>(sv, tid);
-    if (tid == 0)
-        out[blockIdx.x + blockIdx.y * x] = sv[0];
+        BUF[blockIdx.y * x + blockIdx.x] = sv[0];
 }
 
 
 float arr[X];
-
-__global__ void  compute_presum(float *  cpresums, int x){
-    const float gain = 6.0f;
-    const float z = sqrtf(3.f) - 2.f;
-    float z1 = z;
-    float z2 = powf(z, 2 * x - 2);
-    float iz = 1.f / z;
-    cpresums[0] = 0;
-    cpresums[x-1] = 0;
-    for (int j = 1; j < (x - 1); ++j) {
-        cpresums[j] = (z2 + z1);
-        z1 *= z;
-        z2 *= iz;
-    }
-}
 
 #define TILE_DIM 32
 #define BLOCK_ROWS 8
@@ -164,6 +102,9 @@ __global__ void transposeCoalesced(float *odata, const float *idata)
 void solveGPU(float *in, float *out, int x, int y) {
 
 //    cudaMalloc(&buf, x * y * sizeof(float));
+    dim3 a = dim3(x/32, y/32);
+    dim3 b = dim3(32, 8);
+    transposeCoalesced<<<a, b>>>(out, in);
     const float gain = 6.0f;
     const float z = 1.73205080756887729f - 2.f;
     float z1 = z;
@@ -177,37 +118,32 @@ void solveGPU(float *in, float *out, int x, int y) {
         z2 *= iz;
     }
     cudaMemcpyToSymbol(gpresums, arr, x * sizeof(float));
-    dim3 a = dim3(x/32, y/32);
-    dim3 b = dim3(32, 8);
+
 //    compute_presum<<<1, 1>>>(gpresums, x);
 
     bool first = true;
-    transposeCoalesced<<<a, b>>>(out, in);
     for (int a = x; a > 0; a /= SUMBLOCK) {
         int aa = (a + SUMBLOCK - 1) / SUMBLOCK;
         dim3 dimgrid = dim3(aa, y);
 
-        compute_line_sum<<<dimgrid, SUMBLOCK>>>(in, in, x, first, a);
+        compute_line_sum<<<dimgrid, SUMBLOCK>>>(in, x, first, a);
 //        printf("%d\n", aa);
         first = false;
     }
     compute_cols<<<x/BLOCK_SIZE, BLOCK_SIZE>>>(in, out, x, y, true);
-    transposeCoalesced<<<a, b>>>(in, out);
 
-    cudaMemcpy(out, in, x*y* sizeof(float), cudaMemcpyDeviceToDevice);
-    float* cur = out;
+
     first = true;
     for (int a = x; a > 0; a /= SUMBLOCK) {
         int aa = (a + SUMBLOCK - 1) / SUMBLOCK;
-        dim3 dimgrid = dim3(y, aa);
+        dim3 dimgrid = dim3(aa, y);
 
-        compute_col_sum<<<dimgrid, SUMBLOCK>>>(cur, in, x, first, a);
+        compute_line_sum<<<dimgrid, SUMBLOCK>>>(out, x, first, a);
 //        printf("%d\n", aa);
-        cur = in;
         first = false;
     }
-    compute_cols<<<x/BLOCK_SIZE, BLOCK_SIZE>>>(in, out, x, y, false);
-
-
+    transposeCoalesced<<<a, b>>>(in, out);
+    compute_cols<<<x/BLOCK_SIZE, BLOCK_SIZE>>>(in, in, x, y, true);
+    cudaMemcpy(out, in, x*y* sizeof(float), cudaMemcpyDeviceToDevice);
 }
 
