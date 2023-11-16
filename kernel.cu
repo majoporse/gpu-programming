@@ -1,35 +1,35 @@
 //TODO kernel implementation
-#define BLOCK_SIZE 16
+#define BLOCK_SIZE 128
+#define ACC 13
 #include <cmath>
 __device__ float BUF_SUM[X*Y];
 __device__ float gpresums[X > Y ? X : Y];
 
-//__device__ inline void parallel_sum(int x, float sm[BLOCK_SIZE][BLOCK_SIZE + 10], const float *myColIn, float * myCol){
-//    const float z = 1.73205080756887729f - 2.f; //sqrt(3) - 2
-//    unsigned int row = blockIdx.y * blockDim.y + threadIdx.y;
-//    unsigned int tidx = threadIdx.x;
-//    unsigned int tidy = threadIdx.y;
-//
-//    if (threadIdx.y == 0){
-//        //load prev 10
-//        for (int i = 0; i <= 10; ++i)
-//            sm[tidx][10 - i] = myColIn[(row - i) * x] * 6;
-//    } else{
-//        sm[tidx][tidy + 10] = myColIn[row * x] * 6;
-//    }
-//    __syncthreads();
-//
-//    float total = sm[tidx][tidy + 10];
-//    float pow = z;
-//
-//    for (int i = 1; i < 10; ++i){
-//        total += sm[tidx][tidy + 10 - i] * pow;
-//        pow = pow * z;
-//    }
-//    myCol[row * x] = total;
-//}
+__device__ inline void parallel_sum(int x, float sm[BLOCK_SIZE + ACC], const float *myColIn, float * myCol){
+    const float z = 1.73205080756887729f - 2.f; //sqrt(3) - 2
+    unsigned int row = blockIdx.y * blockDim.y + threadIdx.y;
+    unsigned int tidy = threadIdx.y;
 
-__device__ inline void parallel_diff(int x, float sm[BLOCK_SIZE][BLOCK_SIZE + 10],const float* myColIn, float * myCol){
+    if (threadIdx.y == 0){
+        //load prev 10
+        for (int i = 0; i <= ACC; ++i)
+            sm[ACC - i] = myColIn[(row - i) * x] * 6;
+    } else{
+        sm[tidy + ACC] = myColIn[row * x] * 6;
+    }
+    __syncthreads();
+
+    float total = sm[tidy + ACC];
+    float pow = z;
+
+    for (int i = 1; i < ACC; ++i){
+        total += sm[tidy + ACC - i] * pow;
+        pow = pow * z;
+    }
+    myCol[row * x] = total;
+}
+
+__device__ inline void parallel_diff(int x, float sm[BLOCK_SIZE + ACC],const float* myColIn, float * myCol){
     const float z = 1.73205080756887729f - 2.f; //sqrt(3) - 2
     unsigned int row = blockIdx.y * blockDim.y + threadIdx.y;
     unsigned int tidx = threadIdx.x;
@@ -37,20 +37,18 @@ __device__ inline void parallel_diff(int x, float sm[BLOCK_SIZE][BLOCK_SIZE + 10
 
     if (threadIdx.y == blockDim.y - 1){
         //load 10 forward
-        for (int i = 0; i <= 10; ++i){
-            sm[threadIdx.x][threadIdx.y + i] = myColIn[(row + i) * x];
+        for (int i = 0; i <= ACC; ++i){
+            sm[threadIdx.y + i] = myColIn[(row + i) * x];
         }
     } else{
-        sm[threadIdx.x][threadIdx.y] = myColIn[row * x];
+        sm[threadIdx.y] = myColIn[row * x];
     }
     __syncthreads();
 
     float total = 0;
-    double pow = z;
-    for (int i = 0; i < 10; ++i){
-        total += pow * -sm[tidx][tidy + i];
-//        if(blockIdx.y == 0 && blockIdx.x == 0 && threadIdx.y == 11 && threadIdx.x == 0)
-//            printf("| %f |",total);
+    float pow = z;
+    for (int i = 0; i < ACC; ++i){
+        total += pow * -sm[tidy + i];
         pow *= z;
     }
     myCol[row * x] = total;
@@ -78,7 +76,7 @@ __device__ inline void sequential_diff(int x, int y, const float *myColIn, float
     unsigned int col = blockIdx.x * blockDim.x + threadIdx.x;
     const float z = -0.2679491924; //sqrt(3) - 2
 
-    float p = y < 10 ? powf(z, y) : 0;
+    float p = y < ACC ? powf(z, y) : 0;
     float sum = (myColIn[0] + p * myColIn[(y - 1)*x]) * 6 * (1.f + z) / z;
     sum += BUF_SUM[ col * (is_trans ? X : Y) ] * 6;
 
@@ -93,7 +91,7 @@ __device__ inline void sequential_diff(int x, int y, const float *myColIn, float
 }
 
 __global__ void compute_cols(float* din, float* dout, int x, int y, bool is_trans) {
-    __shared__ float sm[BLOCK_SIZE][BLOCK_SIZE + 10];
+    __shared__ float sm[BLOCK_SIZE + ACC];
     unsigned int row = blockIdx.y * blockDim.y + threadIdx.y;
 
     unsigned int col = blockIdx.x * blockDim.x + threadIdx.x;
@@ -109,7 +107,7 @@ __global__ void compute_cols(float* din, float* dout, int x, int y, bool is_tran
 }
 
 __global__ void compute_cols_back(float* din, float* dout, int x, int y, bool is_trans) {
-    __shared__ float sm[BLOCK_SIZE][BLOCK_SIZE + 10];
+    __shared__ float sm[BLOCK_SIZE + ACC];
     unsigned int row = blockIdx.y * blockDim.y + threadIdx.y;
 
     unsigned int col = blockIdx.x * blockDim.x + threadIdx.x;
@@ -212,23 +210,23 @@ void solveGPU(float *in, float *out, int x, int y) {
 
     //compute on transposed matrix
 
-    compute_cols<<<dim3(Y/BLOCK_SIZE, X/BLOCK_SIZE), dim3(BLOCK_SIZE, BLOCK_SIZE)>>>(out, in, y, x, true);
-    compute_cols_back<<<dim3(Y/BLOCK_SIZE, X/BLOCK_SIZE), dim3(BLOCK_SIZE, BLOCK_SIZE)>>>(in, out, y, x, true);
+    compute_cols<<<dim3(Y, X/BLOCK_SIZE), dim3(1, BLOCK_SIZE)>>>(out, in, y, x, true);
+    compute_cols_back<<<dim3(Y, X/BLOCK_SIZE), dim3(1, BLOCK_SIZE)>>>(in, out, y, x, true);
 
     first = true;
     //still transposed matrix
-//    for (int a = y; a > 0; a /= SUMBLOCK) {
-//        int aa = (a + SUMBLOCK - 1) / SUMBLOCK;
-//
-//        compute_line_sum<<<dim3(aa, x), SUMBLOCK>>>(out, y, first, a);
-//        first = false;
-//    }
+    for (int a = y; a > 0; a /= SUMBLOCK) {
+        int aa = (a + SUMBLOCK - 1) / SUMBLOCK;
+
+        compute_line_sum<<<dim3(aa, x), SUMBLOCK>>>(out, y, first, a);
+        first = false;
+    }
 
 //    cudaMemcpy(out, in, x*y* sizeof(float), cudaMemcpyDeviceToDevice);
     transposeCoalesced<<<dim3(y/32, x/32), dim3(32, 8)>>>(in, out);
 
     //compute on normal matrix
-    compute_cols<<<dim3(X/BLOCK_SIZE, Y/BLOCK_SIZE), dim3(BLOCK_SIZE, BLOCK_SIZE)>>>(out, in, x, y, true);
-    compute_cols_back<<<dim3(X/BLOCK_SIZE, Y/BLOCK_SIZE), dim3(BLOCK_SIZE, BLOCK_SIZE)>>>(in, out, x, y, true);
+    compute_cols<<<dim3(X, Y/BLOCK_SIZE), dim3(1, BLOCK_SIZE)>>>(in, out, x, y, false);
+    compute_cols_back<<<dim3(X, Y/BLOCK_SIZE), dim3(1, BLOCK_SIZE)>>>(out, in, x, y, false);
     cudaMemcpy(out, in, x*y* sizeof(float), cudaMemcpyDeviceToDevice);
 }
